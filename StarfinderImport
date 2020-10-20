@@ -1,0 +1,1443 @@
+/* Starfinder STAT BLOCK IMPORTER FOR ROLL20 API
+    Author Kurt.Z 2020-09-01
+    Version 1.0
+	
+	Based on Jason.P's PATHFINDER STAT BLOCK IMPORTER FOR ROLL20 API v2.25
+	workd within Jason's format for the header and instructions
+	https://github.com/Jason-P/Severance/blob/master/PathfinderImport.js
+	
+	Originally found it in this thread:
+	https://app.roll20.net/forum/post/1517881/pathfinder-statblock-import-to-character-sheet-script
+	
+	Looks like props should also go to Peter W. and The Aaron, of course.
+    
+	Written to parse Starfinder stat blocks from Archives of Nethys
+	
+	IT IMPORTS:
+	Name
+	CR 
+	XP
+	Race & Grafts
+    Alignment
+	Size
+	Type and Subtype (string)
+	Initiative Bonus (so total Init adds up with dex mod correctly)
+	Senses (string)
+	Perception
+	Auras (string)
+	Hit Points
+	Resolve Points
+	EAC
+	KAC
+	CMD
+	AC Notes (string)
+	Fort, Ref, Will saves + Save Notes (string)
+	Defensive Abilities (string)
+	DR (string), Immunities (string), Spell Resistance
+	Resistances (String), Weaknesses (String)
+	Speed (string)
+	Melee
+	Multiattack
+	Ranged
+	Space, Reach
+	Str, Dex, Con, Int, Wis, Cha
+	Skills
+	Feats
+	Languages
+	Other Abilites
+	Gear
+	Environment
+	Organization
+	Tactics
+	Special Abilities
+	
+	IT DOES NOT AT THIS POINT IMPORT:
+	  special abilities
+    spells
+    Spell-Like Abilities, CL, Melee Bonus, Range Bonus
+	  Spells Known, CL, Melee Bonus, Range Bonus
+	
+
+	INSTRUCTIONS
+	1. Go to https://www.aonsrd.com/ website, find yourself some baddies (or NPC's)
+	2. Copy the stat block from *Name CRX* to Combat/Other Gear (or SQ, whatever is last. Can copy more, just doesn't get used)
+	3. Paste the stat block into the GM Notes Section of a token in your roll20 campaign.
+        Clean up the title as you want it to appear in your Journal - like "Valeros CR12"
+	4. in the chat box, type the command "!StarfinderImport".
+	
+*/
+
+
+var RegExpEscapeSpecial =/([\/\\\/\[\]\(\)\{\}\?\+\*\|\.\^\$])/g;
+
+
+var AddAttribute = AddAttribute || {};
+function AddAttribute(attr, value, charID) {
+    if (value === undefined )
+    {
+        log(attr + " has returned an undefined value.");
+        sendChat("Error on " + attr + " attribute", "This attribute has been ignored.");
+    }
+    else
+    {
+    createObj("attribute", {
+		name: attr,
+		current: value,
+		characterid: charID
+        
+	});
+    //use the line below for diagnostics!
+    //log(attr + ", " + value);
+	return;
+    }
+}
+// function that adds the various abilities
+var AddAbility = AddAbility || {};
+function addAbility(ability, text, charID) {
+createObj("ability", {
+                name: ability,
+                description: "",
+                action: text,
+                istokenaction: true,
+                characterid: charID
+            });
+}   
+            
+function stripString(str, removeStr, replaceWith) {
+    var r= new RegExp(removeStr.replace(RegExpEscapeSpecial,"\\$1"),'g');
+    return str.replace(r,replaceWith);
+}
+
+
+
+
+/*Cleans up the string leaving text and hyperlinks */
+function cleanUpString(strSpecials)  {
+    strSpecials = stripString(strSpecials, "%20", " ");
+    strSpecials = stripString(strSpecials, "%22", "\"");
+    strSpecials = stripString(strSpecials, "%29", ")");
+    strSpecials = stripString(strSpecials, "%28", "(");
+    strSpecials = stripString(strSpecials, "%2C", ",");
+ 
+ 
+    var inParens = 0;
+    for (var i = 0; i < strSpecials.length; i++)
+    {
+        if (strSpecials[i]==="(")
+            inParens++;
+        if (strSpecials[i]===")")
+            inParens--;
+            
+        if ((inParens > 0) && (strSpecials[i]===","))
+        {
+            var post = strSpecials.slice(i);   
+            strSpecials = strSpecials.replace(post,"") ;
+            post = post.replace(","," ");
+ 
+            strSpecials = strSpecials + post;
+        }
+            
+    }
+    
+ 
+    strSpecials = stripString(strSpecials, "%3C", "<");
+    strSpecials = stripString(strSpecials, "%3E", ">");
+    strSpecials = stripString(strSpecials, "%23", "#");
+    strSpecials = stripString(strSpecials, "%3A", ":");
+    strSpecials = stripString(strSpecials, "%3B", ";");
+    strSpecials = stripString(strSpecials, "%3D", "=");
+    
+    strSpecials = stripString(strSpecials, "</strong>", "");
+    strSpecials = stripString(strSpecials, "<strong>", "");
+    strSpecials = stripString(strSpecials, "</em>", "");
+    strSpecials = stripString(strSpecials, "<em>", "");
+    strSpecials = stripString(strSpecials, "%u2013", "-");
+    strSpecials = stripStringRegEx(strSpecials, "<b", ">");
+    strSpecials = stripString(strSpecials, "</b>", "");
+    strSpecials = stripStringRegEx(strSpecials, "<h", ">");
+    strSpecials = stripStringRegEx(strSpecials, "</h", ">");
+    
+    strSpecials = stripString(strSpecials, "</a>", "");    
+    
+    strSpecials = stripStringRegEx(strSpecials, "<t", ">");
+    strSpecials = stripStringRegEx(strSpecials, "</t", ">");
+    
+    while (strSpecials.search(/%../) != -1) {
+        strSpecials = strSpecials.replace(/%../, "");
+    }  
+    
+    return strSpecials;
+}
+
+
+/* Deletes any characters between the character a and b in incstr */
+function stripStringRegEx(incstr, a, b) {
+    var ea = a.replace(RegExpEscapeSpecial,"\\$1"),
+        eb = b.replace(RegExpEscapeSpecial,"\\$1"),
+        r = new RegExp( ea+'.*?'+eb , 'g');
+    return incstr.replace(r,'');
+}
+
+
+/* Deletes the links from the string str */
+function removeLinks(str) {
+    return stripStringRegEx(str, "<", ">");
+}
+
+
+//looks for an occurrence of str in the array strArray, if found returns that element
+// on doConcat, strips a trailing "and" and concatenates with the next line.
+function findString(strArray, str, doConcat) {
+    var retr,
+    r = new RegExp(str.replace(RegExpEscapeSpecial,"\\$1"));
+    _.find(strArray,function(v,k,l){
+        if(v.match(r)){
+            retr = v;
+            if(doConcat && v.match(/and$/) && l[k+1]) {
+                retr=retr.replace(/and$/,'')+', '+l[k+1];
+            }
+            return true;
+        }
+        return false;
+    });
+    return retr;
+};
+
+
+/* returns the string between two characters a/b */
+function getSubStr(str, a, b) {
+    var ea = a.replace(RegExpEscapeSpecial,"\\$1"),
+        eb = b.replace(RegExpEscapeSpecial,"\\$1"),
+        r = new RegExp( ea+'(.*?)'+eb),
+        m = str.match(r); 
+    return m && m[1];
+}
+
+
+/* returns every string between two characters a/b */
+function getAllSubStr(str, a, b) {
+    var ea = a.replace(RegExpEscapeSpecial,"\\$1"),
+        eb = b.replace(RegExpEscapeSpecial,"\\$1"),
+        r = new RegExp( ea+'(.*?)'+eb,'g'),
+        m = str.match(r); 
+    return m;
+}
+
+
+//removes numbers from array and trims white space on ends of elements
+function removeNumbersFromArray (strArray)
+{
+    return _.map(strArray,function(s){
+        return s.replace(/\d+/g,'').trim();
+    });
+}
+
+
+function removeNonNumericFromArray (strArray)
+{
+    return _.map(strArray,function(s){
+        return parseInt(s.replace(/\D+/g,''),10 || 0);
+    });
+}
+
+
+function sumArray(numArray) {
+    return _.reduce(numArray,function(acc,n){
+        return acc + ( parseInt(n,10) || 0 );
+    }, 0);
+}
+
+function getNumber(myString) {
+    return myString.replace(/(?!-)[^0-9.]/g,"")
+}
+
+function removeNumbers(myString) {
+    return myString.replace(/[0-9]/g,'').trim();
+}
+
+
+function getAbilityMod(ability) {
+    return Math.floor((ability-10)/2);
+}
+
+// ****************************************
+// generateRowID()
+var generateUUID = (function() {
+    "use strict";
+
+    var a = 0, b = [];
+    return function() {
+        var c = (new Date()).getTime() + 0, d = c === a;
+        a = c;
+        for (var e = new Array(8), f = 7; 0 <= f; f--) {
+            e[f] = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz".charAt(c % 64);
+            c = Math.floor(c / 64);
+        }
+        c = e.join("");
+        if (d) {
+            for (f = 11; 0 <= f && 63 === b[f]; f--) {
+                b[f] = 0;
+            }
+            b[f]++;
+        } else {
+            for (f = 0; 12 > f; f++) {
+                b[f] = Math.floor(64 * Math.random());
+            }
+        }
+        for (f = 0; 12 > f; f++){
+            c += "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz".charAt(b[f]);
+        }
+        return c;
+    };
+}()),
+
+generateRowID = function () {
+    "use strict";
+    return generateUUID().replace(/_/g, "Z");
+};
+// ****************************************
+
+function getDamageType (damageAbrev) {
+    
+//log("getDamageType-damageAbrev: " + damageAbrev);
+  
+    var damageType = ""
+    switch(damageAbrev.toLowerCase()) {
+        case "a":
+            damageType="Acid";
+            break;
+        case "c":
+            damageType="Cold";
+            break;
+        case "e":
+            damageType="Electricity";
+            break;
+        case "f":
+            damageType="Fire";
+            break;
+        case "so":
+            damageType="Sonic";
+            break;
+        case "b":
+            damageType="Bludgeoning";
+            break;
+        case "p":
+            damageType="Piercing";
+            break;
+        case "s":
+            damageType="Slashing";
+            break;
+        default:
+            damageType=damageAbrev;
+    }
+    return damageType;
+};
+
+function parseAttack(data,searchString, strMod, reach,repeatStartNum, charID) {
+    
+    const attackLogFlg = false;
+    
+        // start with the whole attack line    
+    var attackLine = findString(data, searchString, true);
+
+    if (attackLine === false || attackLine === undefined) {
+        return 0
+    } else {
+    
+        attackLine = attackLine.replace(searchString,"");
+        attackLine = attackLine.trim();
+        
+    if (attackLogFlg == true) {
+log("\nattackLine: "+attackLine);        
+    }
+
+ 
+        //separate the attack line into two arrays, one with content from outside brackets, one inside.
+        var attackBrackets = getAllSubStr(attackLine,"(", ")");
+        var attackNoBrackets = stripStringRegEx(attackLine,"(", ")");
+        attackNoBrackets = stripString(attackNoBrackets," and ",",");
+        attackNoBrackets = stripString(attackNoBrackets," or ",",");
+        
+    if (attackLogFlg == true) {
+log("attackBrackets: "+attackBrackets);   
+log("attackNoBrackets: "+attackNoBrackets);         
+    }        
+
+        attackNoBrackets = attackNoBrackets.split(",");
+        
+        
+        //initialise the variables outside the loops
+        var attackName = "",
+            lvlNum = "",
+            babBaseBonus = "",
+            attackBonus = "",
+            damageRoll = "",
+            damageType = "",
+            enhance = [0],
+            criticalEffect = "",
+            range = "",
+            engagementRange = "",
+            ammoType = "",
+            ammoAmount = 0,
+            ammoMax = 0,
+            usage = "",
+            special = "",
+            description = "";
+        
+        var multiAttackFlg = false
+        var multiAttackString = ""
+        var multiAttackIndex = 1
+        var multiAttack_numberOfAttacks = 1
+        
+        if (searchString=="Multiattack") { multiAttackFlg = true; }
+        
+           
+        // cycle through each element in the array of attacks
+        for ( i=0; i<attackNoBrackets.length; i++) {
+            attackNoBrackets[i] = attackNoBrackets[i].trim();
+
+    if (attackLogFlg == true) {
+log("attackNoBrackets[i]: "+attackNoBrackets[i]);     
+log("attackBrackets[i]: "+attackBrackets[i]);         
+    }
+
+            //if there are any spaces inside brackets (indicating there is an extra effect)
+            // then set the extraDice = everything after the first space, else ""
+            if(attackBrackets[i].match(/\S+\s/) === null) {
+                extraDice = ""
+            } else {
+                extraDice = attackBrackets[i].replace(/\S+\s/, "");
+            }
+            
+           
+            extraDice = extraDice.replace(")","");
+            //adds the hits and crits mod tag for use in the damage macro later, as well as surrounding
+            //anything in format  XdX with [[ ]] brackets for an inline roll.
+            extraDice = extraDice.replace(/(\d+d\d)/g,"[[$1]]");
+            //search for anything followed by a + in the attack, store as name. ( ) save name separate to +
+            //attackName = attackNoBrackets[i].match(/(.*) \+/);
+            attackName = attackNoBrackets[i].match(/(.*) /g).toString().trim();
+            
+            if (multiAttackFlg == true && attackName.indexOf(' ') > 0) {
+                
+                multiAttack_numberOfAttacks = attackName.slice(0,attackName.indexOf(' '));
+                attackName = attackName.slice(attackName.indexOf(' ')).trim();
+            }
+            else {
+                multiAttack_numberOfAttacks=1
+            }
+            
+            //search for XdX(+/-)X and store as damage string.
+            dmgString = attackBrackets[i].match(/(\d+)d(\d+)\+*?(\-*?\d+)/);
+
+    if (attackLogFlg == true) {
+log("Extra Dice: "+extraDice);          
+    }            
+
+            //seperate extraDice
+            var damageType = ""
+            var damageNotes = ""
+            var damageCrit = ""
+            if (extraDice.includes(";") == true) {
+               var extraDiceArray = extraDice.split(";")
+
+    if (attackLogFlg == true) {
+log("extraDiceArray Length: "+extraDiceArray.length);
+log("extraDiceArray[0]: " +extraDiceArray[0]);        
+    }               
+
+                if (extraDiceArray[0].includes(" ") ==true) {
+                    damageType = getDamageType(extraDiceArray[0].substr(0,extraDiceArray[0].indexOf(" ")).trim());
+                    damageNotes = extraDiceArray[0].substr(extraDiceArray[0].indexOf(" ")+1);
+                }
+                else {
+                    damageType = getDamageType(extraDiceArray[0].trim());
+                }
+                
+                
+                if (extraDiceArray.length>1 && extraDiceArray[1].includes("critical ") == true) {
+                   damageCrit = extraDiceArray[1].replace("critical ","").trim();
+                }
+            }
+            // only critical
+            else if (extraDice.length>0 && extraDice.includes("critical ") == true) {
+                damageCrit = extraDice.replace("critical ","").trim();
+            }
+            // only damage type
+            else {
+                
+                damageType=getDamageType(extraDice);    
+
+
+            }
+            
+    if (attackLogFlg == true) {
+log("damageType: " + damageType);
+log("damageNotes: " + damageNotes);
+log("damageCrit: " + damageCrit);            
+            
+log("AttackName: "+attackName);
+log("dmgString: "+dmgString);        
+    }
+
+
+            //This if handles the case where the damage is just XdX  (no addition or subtraction)
+            if (dmgString === null) {
+                dmgString = attackBrackets[i].match(/(\d+)d(\d+)/);
+                dmgDiceAdd = 0;
+            } else {
+                dmgDiceAdd = parseInt(dmgString[3],10);
+            }
+            
+            dmgDiceNum = parseInt(dmgString[1],10);
+            dmgDiceSides = parseInt(dmgString[2],10);
+
+    if (attackLogFlg == true) {
+log("dmgDiceAdd: "+dmgDiceAdd);
+log("dmgDiceNum: "+dmgDiceNum);
+log("dmgDiceSides: "+dmgDiceSides+"\n");        
+    }            
+
+            //search for X- as threaten (eg 19-20 = 19), "/x"X as crit multiplier
+            threatenString = attackBrackets[i].match(/\/(\d+)-/);
+            critMultString = attackBrackets[i].match(/\/(\d+)\)/);
+            //if the first character is a + (eg +4 longsword) then remove the +, store the enhancement
+            enhance[i] = 0
+            if (attackNoBrackets[i].charAt(0)=== "+") {
+                enhance[i] = parseInt(attackNoBrackets[i].charAt(1),10);
+                attackNoBrackets[i] = attackNoBrackets[i].slice(1);
+            }
+            
+            attackString = attackNoBrackets[i].match(/\+(\d+)/g);
+            attackValues = [""]
+            
+            for (n=0; n<attackString.length; n++) {
+             attackValues[n] = parseInt(attackString[n].replace("+",""),10);
+            }
+            
+            if (threatenString === null) {
+                threatenString = [20,20]
+            }
+            
+            if (critMultString === null) {
+                critMultString = ["/x2",2]
+            }
+            
+            //define the parts of the attack formula (header, body, footer)
+            //abiStrAttackHeader = "/e @{Selected|Token_Name} attacks with "+attackName[1]+"!!!";
+            abiStrAttackHeader = "/e @{Selected|Token_Name} attacks with "+attackName+"!!!";
+            
+            abiStrAttack = "";
+            for (j = 0; j< attackString.length;j++) {
+                abiStrAttack = abiStrAttack + "\nAttack "+(j+1)+": [[1d20 "+attackString[j]+"]]"
+                }
+            abiStrAttackFooter = "\nCrit on "+threatenString[1]+critMultString[0]+", "+reach+" Range)";
+            
+            //add the ability with the concatenated formula string
+            abilityAttackString = abiStrAttackHeader + abiStrAttack + abiStrAttackFooter;
+//log("abilityAttackString "+abilityAttackString);            
+//log("attackName "+attackName);     
+            
+//            addAbility(attackName, abilityAttackString, charID)
+            
+            //define the parts of the damage formula (Header, Body, Footer)
+            abiStrDamageHeader = "/e @{Selected|Token_name}'s "+ attackName + " damage";
+            abiStrDamage = "\nTotal: [[(?{Hits-Landed|0}*"+dmgDiceNum+")d"+dmgDiceSides+"+?{Hits-Landed|0}*"+dmgDiceAdd+"+(?{Crits-Landed|0}*"+dmgDiceNum*critMultString[1]+")d"+dmgDiceSides+"+?{Crits-Landed|0}*"+dmgDiceAdd*critMultString[1]+")]] in ?{Hits-Landed|0} Hits and ?{Crits-Landed|0} Criticals.";
+            abiStrDamageFooter = "\n"+extraDice
+           
+            abilityDamageString = abiStrDamageHeader + abiStrDamage + abiStrDamageFooter;
+            //addAbility(attackName+"-DMG", abilityDamageString, charID);
+
+            var damageString = "[["+ dmgDiceNum + "d" + dmgDiceSides + "+" + dmgDiceAdd + "]]";
+            var damageCritString = "[["+ dmgDiceNum + "d" + dmgDiceSides + "]]";
+
+    if (attackLogFlg == true) {
+log("damageString = " + damageString);
+log("damageCritString = " + damageCritString);        
+    }            
+
+// make attack macro
+            var attackMacroString =""
+            if (multiAttackFlg == false) {
+                attackMacroString = "@{selected|whisper_state}&{template:sf_attack}{{name=@{selected|character_name} " + attackName + " Attack}} {{characterid=@{selected|character_id}}} {{title=Versus @{target|token|token_name} EAC: @{target|token|eac} KAC:@{target|token|kac}}} {{leftbanner=^{level} [[[[0]]d1cs>2cf>2]]}} {{fullattack=[[?{Full Attack|No,0|Yes,1}*(2)]]}} {{r1name=" + attackName + "}} {{r1=[[1d20" + attackString[0] + "[BAB]+[[?{Full Attack|No,0|Yes,1}*(-4)]][FULL ATTACK]]]}} {{damage1type=" + damageType +"}} {{damage1=" + damageString +"}} {{crit1damage=" + damageCritString +"}} {{crit1effect=" + damageCrit +"}} {{r2name=" + attackName + "}}  {{r2=[[1d20" + attackString[0] + "[BAB]+[[?{Full Attack|No,0|Yes,1}*(-4)]][FULL ATTACK]]]}} {{damage2type=" + damageType +"}} {{damage2=" + damageString +"}} {{crit2damage=" + damageCritString +"}} {{crit2effect=" + damageCrit +"}} {{range=}} {{ammo_type=}} {{curr_ammo=}} {{rightbanner=}} {{notes=" + damageNotes +"}}"
+                addAbility(attackName, attackMacroString, charID);
+            }
+            else {
+                if (multiAttackIndex == 1)  {
+                    multiAttackString ="@{selected|whisper_state}&{template:sf_attack}{{name=@{selected|character_name} Multiattack}} {{characterid=@{selected|character_id}}} {{title=Versus @{target|token|token_name} EAC: @{target|token|eac} KAC:@{target|token|kac}}} {{leftbanner=^{level} [[[[0]]d1cs>2cf>2]]}}"
+                    for (var ix=0;ix<multiAttack_numberOfAttacks;ix++){
+                        multiAttackString +="{{fullattack=[["+multiAttackIndex+"]]}} {{r" + multiAttackIndex + "name=" + attackName + "}} {{r" + multiAttackIndex + "=[[1d20" + attackString[0] + "[BAB]]]}} {{damage" + multiAttackIndex + "type=" + damageType +"}} {{damage" + multiAttackIndex + "=" + damageString +" "+damageNotes+"}} {{crit" + multiAttackIndex + "damage=" + damageCritString +"}} {{crit" + multiAttackIndex + "effect=" + damageCrit +"}}"
+                        multiAttackIndex++    
+                    }
+
+                }
+                else {
+                    for (var ix=0;ix<multiAttack_numberOfAttacks;ix++){
+                        multiAttackString +="{{fullattack=[["+multiAttackIndex+"]]}} {{r" + multiAttackIndex + "name=" + attackName + "}} {{r" + multiAttackIndex + "=[[1d20" + attackString[0] + "[BAB]]]}} {{damage" + multiAttackIndex + "type=" + damageType +"}} {{damage" + multiAttackIndex + "=" + damageString +" "+damageNotes+"}} {{crit" + multiAttackIndex + "damage=" + damageCritString +"}} {{crit" + multiAttackIndex + "effect=" + damageCrit +"}}"
+                        multiAttackIndex++
+                    }
+                }
+            }
+            //var attackMacroString = "@{selected|whisper_state}&{template:sf_attack}{{name=@{selected|character_name} " + attackName + " Attack}} {{characterid=@{selected|character_id}}} {{title=Versus @{target|token|token_name} EAC: @{target|token|eac} KAC:@{target|token|kac}}} {{leftbanner=^{level} [[[[0]]d1cs>2cf>2]]}} {{fullattack=[[?{Full Attack|No,0|Yes,1}*(2)]]}} {{r1name=" + attackName + "}} {{r1=[[1d20" + attackString[0] + "[BAB]+[[?{Full Attack|No,0|Yes,1}*(-4)]][FULL ATTACK]]]}} {{damage1type=" + damageType +"}} {{damage1=" + damageString +"}} {{crit1damage=" + damageCritString +"}} {{crit1effect=" + damageCrit +"}} {{r2name=" + attackName + "}}  {{r2=[[1d20" + attackString[0] + "[BAB]+[[?{Full Attack|No,0|Yes,1}*(-4)]][FULL ATTACK]]]}} {{damage2type=" + damageType +"}} {{damage2=" + damageString +"}} {{crit2damage=" + damageCritString +"}} {{crit2effect=" + damageCrit +"}} {{range=}} {{ammo_type=}} {{curr_ammo=}} {{rightbanner=}} {{notes=" + damageNotes +"}}" 
+
+
+    if (attackLogFlg == true) {
+log("attackMacroString = "+attackMacroString);
+log("attackName: "+attackName);        
+    }
+
+//end attack macro
+
+
+
+            var attackType = 0
+            var damageAbility = 0
+            if (searchString === "Melee") {
+                attackType = "@{attk-melee}"
+                damageAbility = "@{STR-mod}"
+            } else if (searchString === "Ranged") {
+                attackType = "@{attk-ranged}"
+            }
+
+
+            attack = attackValues[0]-attackBonus - enhance[i]
+            //assumes all melee attacks use full str bonus...
+            // damage = dmgDiceAdd -dmgBonus - enhance[i]
+            damage = dmgDiceAdd  - enhance[i]
+            
+            
+
+
+            // add repeating weapon X attributes (enhance = 1 and masterwork by default at this point
+            var repeatNum = i+repeatStartNum;
+            var rowID = generateRowID();
+//log("rowID: "+rowID);
+//log("repeatNum: "+repeatNum);
+
+
+            //sendChat("","!setattr --mute --charid "+charID+" --repeating_attack_-create_name|"+attackName);
+
+/*
+            AddAttribute("repeating_attack_"+repeatNum+"_Name","Laser "+repeatNum,charID);
+            AddAttribute("repeating_attack_"+repeatNum+"_level",1,charID);
+            AddAttribute("repeating_attack_"+repeatNum+"_bonus","13",charID);
+            AddAttribute("repeating_attack_"+repeatNum+"_base_attack_bonus_base",10,charID);
+            AddAttribute("repeating_attack_"+repeatNum+"_range","30 ft",charID);
+            AddAttribute("repeating_attack_"+repeatNum+"_damage_dice","5d4",charID);
+            AddAttribute("repeating_attack_"+repeatNum+"_engagement_range","ranged",charID);
+            AddAttribute("repeating_attack_"+repeatNum+"_crit","Frost [[1d4]]",charID);
+*/            
+
+/*            
+        */    
+        }  
+         
+        if (multiAttackFlg == true ) {
+            //log(multiAttackString);
+            //multiAttackString = multiAttackString.replace("{{fullattack=1}}","{{fullattack="+  (multiAttackIndex -1) +"}} ");
+            multiAttackString += "{{range=}} {{ammo_type=}} {{curr_ammo=}} {{rightbanner=}} {{notes=}}"
+            //log("2: "+multiAttackString);
+            addAbility("Multiattack", multiAttackString, charID);
+            return 1;
+        }
+        return attackNoBrackets.length
+        
+        
+    }
+
+}
+
+function camelCase(str) {
+  return str.split(' ').map(function(word,index){
+    // If it is not the first word only upper case the first char and lowercase the rest.
+    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+  }).join(' ');
+}
+
+on('ready',function() {
+    on('chat:message', function (msg) {
+     
+        const showLog = false;
+     
+        // Only run when message is an api type and contains "!StarfinderImport"
+        if (msg.type == 'api' && msg.content.indexOf('!StarfinderImport') !== -1) {
+     
+        if (!(msg.selected && msg.selected.length > 0)) return; // Make sure there's a selected object
+     
+        var token = getObj('graphic', msg.selected[0]._id);
+        if (token.get('subtype') != 'token') return; // Don't try to set the light radius of a drawing or card
+        
+        
+        //*************  START CREATING CHARACTER****************
+        // get notes from token
+        var originalGmNotes = token.get('gmnotes');
+        var gmNotes = token.get('gmnotes');
+        
+        //strip string with function
+        gmNotes = stripString(gmNotes, "%3C/table%3E", "%3Cbr");
+        gmNotes = stripString(gmNotes, "%3C/h1%3E", "%3Cbr");
+        gmNotes = stripString(gmNotes, "%3C/h2%3E", "%3Cbr");
+        gmNotes = stripString(gmNotes, "%3C/h3%3E", "%3Cbr");
+        gmNotes = stripString(gmNotes, "%3C/h4%3E", "%3Cbr");
+        
+        //break the string down by line returns
+        var data = gmNotes.split("%3Cbr");
+        
+        //clean any characters excepting text and hyperlinks
+        for (var i = 0; i < data.length; i++) 
+        {
+            data[i] = cleanUpString(data[i]);
+            data[i] = removeLinks(data[i]);
+            if (data[i][0]===">")
+            {
+                data[i] = data[i].replace(">","");
+            }
+        }
+        
+        for (var i = 0; i < data.length; i++) {
+            if (data[i] !== null){
+            data[i] = data[i].trim();
+            }
+        }
+    
+        //Determine and enter CR
+        var Header = data[0].split("CR");
+        var tokenName = Header[0].trim();
+        var CR = Header[1];
+        
+        tokenName=camelCase(tokenName);
+        var charName = tokenName.trim();
+        //charName=camelCase(charName);        
+        
+        // check if the character entry already exists, if so error and exit.
+        var CheckSheet = findObjs({
+            _type: "character",
+            name: charName
+        });
+        
+        if (CheckSheet.length > 0) {
+            // Restore *******************************
+            //sendChat("ERROR", "This character already exists.");
+            //return;
+            // remove below **************************
+            //sendChat("API","Removing existing character.");
+            CheckSheet[0].remove();
+        };
+        
+        //sendChat("Debug:charName: ", charName);
+            
+        //Create character entry in journal, assign token
+        var character = createObj("character", {
+            avatar: token.get("imgsrc"),
+            name: charName,
+            bio: token.get('gmnotes'),
+            //gmnotes: token.get('gmnotes'),
+            gmnotes: gmNotes,
+            archived: false
+        });
+        
+        if(showLog == true){
+log("\nName: "+charName);            
+        }
+
+        
+        var charID = character.get('_id');
+        token.set("represents", charID);
+        
+        AddAttribute("sheet_type", "npc",charID);
+        AddAttribute("mod_method","manual",charID);
+        AddAttribute("tab_select","0",charID);
+        AddAttribute("whisper_state","/w gm ",charID);
+        
+        AddAttribute("gmnotes",gmNotes,charID);
+        
+        character.set("gmnotes",gmNotes);
+        
+        if(showLog == true){
+log("CR");            
+        }    
+
+
+        AddAttribute("character_level",CR,charID);
+        
+        if(showLog == true){
+log("XP");            
+        }
+
+        //split and enter XP
+        var xpHeader = data[1].split(" ");
+        var XP = xpHeader[1];
+        AddAttribute("xp",XP,charID);
+         
+        /* 
+        //***will work on this later
+        //
+        //race, class, level
+        var raceMatch = data[2].match(/(\w+)\s(\w+)\s(\d+)/)
+        if( raceMatch!= null) {
+            var race = raceMatch[1], 
+                className = raceMatch[2],
+                classLevel = raceMatch[3];
+        AddAttribute("race",race,charID)
+        AddAttribute("class-0-name",className +" "+ classLevel,charID)
+        }
+        */
+        
+        // Alignment, Size, Type
+        var sizesWithSpace = "Fine ,Diminutive ,Tiny ,Small ,Medium ,Large ,Huge ,Gargantuan ,Colossal ";
+        var sizesArray = sizesWithSpace.split(",");
+
+        if(showLog == true){
+log("Alignment");            
+        }    
+
+        for (var i = 0; i < 9; i++) 
+        {
+            if (findString(data, sizesArray[i], true) !== undefined) 
+            {
+                var sizeLine = findString(data, sizesArray[i], true);
+                break;
+            }
+            
+        }
+        
+        //get subtype before destroying string
+    
+    
+        
+        if (sizeLine !== undefined) {
+           var subType = getSubStr(sizeLine, "(", ")");
+            //remove the brackets and anything between them, trim the string,
+            //create the array split at spaces, then assign the alignment to the sheet.
+            var typeArray = stripStringRegEx(sizeLine, "(", ")");
+            typeArray = typeArray.trim();
+            typeArray = typeArray.split(" ");
+            AddAttribute("alignment",typeArray[0],charID);
+            
+           // apparently i have to convert size into a value?
+            var sizes = ['Fine','Diminutive','Tiny','Small','Medium','Large','Huge','Gargantuan','Colossal'];
+            var sizeTable = [4,3,2,1,0,-1,-2,-3,-4];
+        
+             var sizeNum = 0
+             if(typeArray[1]=='Fine') {
+                 sizeNum=-4;
+             } else if (typeArray[1]=='Diminutive') {
+                 sizeNum=-3;
+             } else if (typeArray[1]=='Tiny') {
+                 sizeNum=-2;
+             } else if (typeArray[1]=='Small') {
+                 sizeNum=-1;
+             } else if (typeArray[1]=='Medium') {
+                 sizeNum=0;
+             } else if (typeArray[1]=='Large') {
+                 sizeNum=1;
+             } else if (typeArray[1]=='Huge') {
+                 sizeNum=2;
+             } else if (typeArray[1]=='Gargantuan') {
+                 sizeNum=3;
+             } else if (typeArray[1]=='Colossal') {
+                 sizeNum=4;
+             } else {
+                 sizeNum=0;
+             }
+    
+            AddAttribute("size", sizeNum,charID);
+        
+            // concatenate type and subtype to put into the text box
+            var bothTypes= typeArray[2]
+            if (subType !== null){
+               bothTypes = bothTypes.concat(" (" , subType,")");
+            }
+            AddAttribute("type_subtype",bothTypes,charID);  
+        }
+       
+        if(showLog == true){
+log("Statistics");            
+        }    
+
+        //*****ATTRIBUTE SCORES***************
+        //find the element in the data array that the title "Statistics" occurs in
+        var statsElementNumber = data.indexOf("Statistics");
+        
+        if (statsElementNumber < 0){
+            statsElementNumber = data.indexOf("STATISTICS");
+        }
+        
+        if (statsElementNumber > 0){
+             var stats = data[statsElementNumber+1];
+ 
+         if(showLog == true){
+log("stats: "+stats);            
+        }           
+
+            stats = stats.split(";");
+    
+            //assign attribute scores by removing non numerical characters from the stats array elements
+            var strMod = getNumber(stats[0]);
+            var dexMod = getNumber(stats[1]);
+            var conMod = getNumber(stats[2]);
+            var intMod = getNumber(stats[3]);
+            var wisMod = getNumber(stats[4]);
+            var chaMod = getNumber(stats[5]);
+
+            if(showLog == true){
+log("stats[0] "+stats[0]);                 
+log("strMod: "+strMod);                
+log("stats[1] "+stats[1])                
+log("stats[2] "+stats[2]);            
+log("stats[3] "+stats[3]);            
+log("stats[4] "+stats[4]);            
+log("stats[5] "+stats[5]);               
+            }
+    
+            // place attribute scores in NPC sheet
+            AddAttribute("strength_mod",strMod,charID);
+            AddAttribute("dexterity_mod",dexMod,charID);
+            AddAttribute("constitution_mod",conMod,charID);
+            AddAttribute("intelligence_mod",intMod,charID);
+            AddAttribute("wisdom_mod",wisMod,charID);
+            AddAttribute("charisma_mod",chaMod,charID);           
+        }
+        //the actual attribute scores are in the element after the heading
+
+      
+        //find and store initiative bonus, Senses, Perception
+       // var initArray = findString(data, "Init", true);
+        if(showLog == true){
+log("Init");            
+        }
+
+        
+        if (findString(data, "Init", true) !== undefined) 
+        {
+            var initLine = findString(data, "Init", true);
+        }
+        
+        if(showLog == true){
+log("Debug: initLine "+initLine);            
+        }
+
+        var initArray = initLine.split(";");
+        
+        //sendChat("Debug:initArray[0]: ", initArray[0]);
+        //sendChat("Debug:initArray[1]: ", initArray[1]);
+        //sendChat("Debug:initArray[2]: ", initArray[2]);
+        
+        var initiative = initArray[0];
+        initiative = initiative.replace(/\D/g,"");
+        var initBonus = initiative ;
+        AddAttribute("initiative",initBonus,charID);
+
+        if(showLog == true){
+log("Senses");            
+        }       
+
+        //initArray.splice(0,1);
+        //initArray[0] = initArray[0].replace(" Senses ","");
+        //initArray.toString();
+        var senses = initArray[1].replace(" Senses ","");
+        AddAttribute("senses",senses,charID);
+        
+        if(initArray[2] !== undefined) {
+            var perception = initArray[2];
+            perception = perception.replace(/\D/g,"");
+            AddAttribute("perception",perception,charID);    
+        }
+
+        if(showLog == true){
+log("Auras");            
+        }        
+
+       
+        //************ Auras ****************
+        
+        var aurasLine = findString(data, "Aura", true);
+        if (aurasLine !== undefined) 
+        { 
+            aurasLine = aurasLine.replace("Aura ","");
+            AddAttribute("aura",aurasLine,charID);
+        }
+        
+        if(showLog == true){
+log("ACs");              
+        }        
+        
+        //*****AC Breakdown**************
+        var acLine = findString(data, "EAC ", true);
+        if(acLine !== undefined) {
+            var acBreakdown = acLine.split(";");
+            var eac = acBreakdown[0].replace(/\D/g,"");
+            var kac = acBreakdown[1].replace(/\D/g,"");
+            var cmd = parseInt(kac,10) + 8;
+        
+            AddAttribute("eac",eac,charID);
+            AddAttribute("kac",kac,charID);
+            AddAttribute("cmd",cmd,charID);  
+        }
+
+     
+        //****************  Health  ************************
+        var hpArray = findString(data, "HP ", true);
+        var HP = "0";
+        if(hpArray !== undefined) {
+            
+        if(showLog == true){
+log("hpArray " + hpArray);            
+        }
+
+            hpArray = stripStringRegEx(hpArray, "(", ")");
+            hpArray = hpArray.split(" ");
+            
+            if(showLog == true){
+log("hpArray[0] "+hpArray[0]);            
+            }
+
+            HP = hpArray[1];
+            AddAttribute("hp",HP,charID);
+            var oAtt1 = findObjs({_type: "attribute",name: "hp",_characterid: charID})[0];
+            if(oAtt1 == undefined) {log('Token is missing Attribute on its sheet');}
+            else{oAtt1.set('max', HP);}            
+        }
+
+        if(showLog == true){
+log("Saves");            
+        }     
+
+        //****************  Saves  ************************
+        var savesLine = findString(data, "Fort ", true);
+        
+        if(savesLine !== undefined) {
+            
+            if(showLog == true){
+log("SavesLine: "+savesLine);            
+            }
+
+            var savesArray = savesLine.split(";");
+            
+            if(showLog == true){
+log("saveslength: "+savesArray.length);                
+            }
+
+            if(savesArray !== undefined && savesArray.length>=3) {
+                savesNum = removeNonNumericFromArray(savesArray);
+                
+                var fortitude = savesNum[0];
+                var reflex = savesNum[1];
+                var willpower = savesNum[2];
+                
+                if(showLog == true){
+log("Fort: "+fortitude);
+log("Ref: "+reflex);
+log("Will: "+willpower);            
+                }
+
+                
+                var savesArrayExtra = savesLine.split(";");
+                savesArrayExtra.splice(0,3);
+                
+                if(showLog == true){
+log("SaveNotes: "+savesArrayExtra);                    
+                }
+
+                
+                AddAttribute("fort",fortitude,charID);
+                AddAttribute("ref",reflex,charID);
+                AddAttribute("will",willpower,charID);
+                AddAttribute("save_notes",savesArrayExtra.toString(),charID);  
+            }
+             
+        }
+
+        if(showLog == true){
+log("Defensive Abilities");            
+        }        
+
+        //************ Defensive Abilities ****************
+        
+        var defenseLine = findString(data, "Defensive Abilities", true);
+        if (defenseLine !== undefined) 
+        { 
+            
+            if(showLog == true){
+log("defenseLine: "+defenseLine);                
+            }
+
+            defenseArray = defenseLine.split(";");
+            
+            defenseArray.forEach(function (defenseItem) {
+
+            if(showLog == true){
+log("defenseItem: "+defenseItem);                
+            }    
+
+                
+                if(defenseItem.includes("Defensive Abilities ")==true){
+                    defenseItem = defenseItem.replace("Defensive Abilities ","");
+                    AddAttribute("defensive_abilities",defenseItem.trim(),charID);
+                }else if(defenseItem.includes("Immunities ")==true){
+                    defenseItem = defenseItem.replace("Immunities ","");
+                    AddAttribute("immunities",defenseItem.trim(),charID);
+                }else if(defenseItem.includes("Resistances ")==true){
+                    defenseItem = defenseItem.replace("Resistances ","");
+                    AddAttribute("resistances",defenseItem.trim(),charID);
+                }else if(defenseItem.includes("Weaknesses ")==true){
+                    defenseItem = defenseItem.replace("Weaknesses ","");
+                    AddAttribute("weaknesses",defenseItem.trim(),charID);
+                }else if(defenseItem.includes("DR ")==true){
+                    defenseItem = defenseItem.replace("DR ","");
+                    AddAttribute("dr",defenseItem.trim(),charID);
+                }else if(defenseItem.includes("SR ")==true){
+                    
+                    if(showLog == true){
+log("SR: "+defenseItem);                    
+                    }
+
+                    defenseItem = defenseItem.replace("SR ","");
+                    AddAttribute("sr",defenseItem.trim(),charID);
+                }
+                
+            });
+            
+           
+        }
+        
+        if(showLog == true){
+log("Weaknesses");            
+        }
+
+        //************ Weaknesses ****************
+        
+        var weaknessesLine = findString(data, "Weaknesses ", true);
+        if (weaknessesLine !== undefined) 
+        {
+            
+            if(showLog == true){
+log("weaknessesLine: "+ weaknessesLine);                
+            }
+
+            weaknessesLine = weaknessesLine.replace("Weaknesses ","");
+            AddAttribute("weaknesses",weaknessesLine.trim(),charID);
+        }
+        
+        if(showLog == true){
+log("Speed");              
+        }
+     
+        //*************** Speed ***********************
+        
+            var speedStr = findString(data, "Speed ", true);
+            
+        if (speedStr !== undefined) 
+        {
+            
+            if(showLog == true){
+log("Speed: "+ speedStr);                
+            }
+
+            speedStr = speedStr.replace("Speed ","");
+            AddAttribute("speed",speedStr.trim(),charID);
+        }
+        
+        if(showLog == true){
+log("Space, Reach");              
+        }        
+         
+        //*********** Space, Reach **********
+        // find line containing "Space"
+        var space = "",
+            reach = "";
+            
+        var reachLine = findString(data, "Space ", true);
+        if (reachLine !== undefined) 
+        {
+        //get subtype before destroying string
+        //var reachNotes = getSubStr(reachLine, "(", ")");
+        //var reachArray = stripStringRegEx(reachLine, "(", ")");
+        var reachNums = reachLine.split(";");
+        //reachNums = removeNonNumericFromArray (reachNums);
+        space = reachNums[0].replace("Space ","");
+        reach = reachNums[1].replace("Reach ","");
+    
+    
+        //AddAttribute("reach-notes",reachNotes,charID);
+        }
+        else
+        {
+        space = 5
+        reach = 5
+        }
+        AddAttribute("space",space,charID);
+        AddAttribute("reach",reach,charID);
+        
+        
+        //************ Add Saves and Perception Abilities *****************
+        //*****************************************************************
+        var abilitySaveString = "/w @{character_name} &{template:sf_generic} {{name=@{character_name}}} {{characterid=@{character_id}}} {{title=SAVES}} {{buttons1=[FORT](~selected|fort) | [REF](~selected|ref) | [WILL](~selected|will)}}";
+        var abilityPerceptionString = "/w @{character_name} &{template:sf_generic} {{name=@{character_name}}} {{characterid=@{character_id}}} {{title=PERCEPTION}} {{r1name=Roll}} {{r1= [[1d20+@{perception}]]}} ";
+        addAbility("Saves", abilitySaveString, charID);
+        addAbility("Perception", abilityPerceptionString, charID);
+        
+
+        //************ MELEE ATTACK *******************
+        //*********************************************
+        // ParseAttack syntax:
+        // ParseAttack(text to search, string to look for, attack bonus, damage bonus, reach, repeat number, charID)
+        var numMeleeAttacks = parseAttack(data,"Melee", strMod, reach, 2, charID);
+    
+     
+        //************ RANGED ATTACK *******************
+        //**********************************************
+        var numRangedAttacks = parseAttack(data,"Ranged",0, reach,2+numMeleeAttacks,charID);
+        
+        //************ Multi ATTACK *******************
+        //**********************************************
+        var numMultiAttacks = parseAttack(data,"Multiattack",0, reach,2+numMeleeAttacks+numRangedAttacks,charID);
+
+/*
+        
+        //*********** Special Attacks ****************
+        var specAtks = findString(data, "Special Attacks", true);
+        if (specAtks != null) {
+        specAtks = specAtks.replace("Special Attacks ","");
+        AddAttribute("npc-special-attacks",specAtks,charID);
+        }
+        
+        //*********** Before and During Combat ************
+        var beforeCombat = findString(data, "Before Combat", true);
+        if (duringCombat != null) {
+        beforeCombat = beforeCombat.replace("Before Combat ","");
+        AddAttribute("npc-before-combat",beforeCombat,charID);
+        }
+        
+        var duringCombat = findString(data, "During Combat", true);
+        if (duringCombat != null) {
+        duringCombat = duringCombat.replace("During Combat ","");
+        AddAttribute("npc-during-combat",duringCombat,charID);
+        }
+        
+*/
+        if(showLog == true){
+log("Feats");            
+        }
+
+        //**************** FEATS **********************
+        var feats = findString(data, "Feats ", true);
+        if (feats!== undefined)
+        {
+            feats = feats.replace("Feats ","");
+            AddAttribute("feats",feats.trim(),charID);
+        }
+        
+       
+        //****************SKILLS************************
+        if(showLog == true){
+log("Skills");            
+        }
+
+        var skillsLine = findString(data, "Skills", true);
+        if (skillsLine !== undefined) 
+        { 
+            skillsLine = skillsLine.replace("Skills ","");
+            skillsLine = stripString(skillsLine, " +", "");
+            //var skillsBrackets = getSubStr(skillsLine,"(", ")");
+           // var skillsNoBrackets = stripStringRegEx(skillsLine,"(", ")");
+            
+            if(showLog == true){
+log("skillsLine: "+skillsLine);                
+            }
+
+            //var skillsTotal = skillsNoBrackets.split(",")
+           // var skillsName = skillsNoBrackets.split(",")
+           
+            var skillsTotal = skillsLine.split(",");
+            
+            //skillsTotal = removeNonNumericFromArray (skillsTotal);
+            //skillsName = removeNumbersFromArray (skillsName);
+            
+            //make the arrays that are used to find out the relevant skill attribute
+            //var skillsAll = "Acrobatics,Athletics,Bluff,Computers,Culture,Diplomacy,Disguise,Engineering,Intimidate,Life Science,Medicine,Mysticism,Perception,Physical Science,Piloting,Sense Motive,Sleight of Hand,Stealth,Survival";
+            //skillsAll = skillsAll.split(",");
+
+              //go through each skill, determine its total score, then determine the total ranks using the relevant modifer.
+            for (var i = 0; i < skillsTotal.length; i++) 
+            {   
+                var nameStr = ""
+                var skillString = skillsTotal[i];
+                var skillNotes = getSubStr(skillString, "(", ")");
+                var skillMain = stripStringRegEx(skillString, "(", ")");
+                var skillTotal = getNumber(skillMain);
+                nameStr = removeNumbers(skillMain);
+                nameStr = stripString(nameStr.trim(), " ", "_");
+                //output skill to char sheet
+                AddAttribute(nameStr.toLowerCase(),skillTotal,charID);
+                if (skillNotes !== undefined){
+                    var skillDescription = nameStr.toLowerCase() + "_description";
+                    AddAttribute(skillDescription,skillNotes,charID);
+                }
+            }
+            
+            
+        }
+        
+         
+        //********** LANGUAGES *****************
+        
+        var languageStr = findString(data, "Languages", true);
+        if (languageStr !== undefined) {
+            languageStr = languageStr.replace("Languages ","");
+            AddAttribute("languages",languageStr,charID);
+        }
+        
+        
+        //********** Other Abilities and Offensive Abilites *****************
+        var abilitiesStr = ""
+        var offAbilitiesStr = findString(data, "Offensive Abilities ", true);
+        
+        if (offAbilitiesStr !== undefined) {
+            offAbilitiesStr = offAbilitiesStr.replace("Offensive Abilities ","");
+            abilitiesStr = offAbilitiesStr    
+        }
+        
+        var otherAbilitiesStr = findString(data, "Other Abilities ", true);
+        if (otherAbilitiesStr !== undefined) {
+            otherAbilitiesStr = otherAbilitiesStr.replace("Other Abilities ","");
+            if (abilitiesStr.length > 0) { abilitiesStr += ", "} 
+            abilitiesStr += otherAbilitiesStr    
+        }
+
+        if (abilitiesStr.length>0) {
+            AddAttribute("other_abilities",abilitiesStr,charID);
+        }
+        
+        //********** GEAR *****************
+        var gearStr = findString(data, "Gear ", true);
+        if (gearStr !== undefined) {
+            gearStr = gearStr.replace("Gear ","");
+            AddAttribute("gear",gearStr,charID);
+        }
+       
+         //********** TACTICS *****************     
+        var tacticsIndex = data.indexOf("TACTICS");
+        if (tacticsIndex > 0) {
+            var statIndex = data.indexOf("STATISTICS");
+            
+            if (statIndex > 0 ) {
+                
+                var tacticsString = ""
+                
+                if (tacticsIndex < statIndex) {
+                    for  (var i = tacticsIndex+1; i < statIndex; i++) {
+                        
+                        if(showLog == true){
+log("index: "+i + " Data: "+ data[i]);                            
+                        }
+
+                        tacticsString += data[i]+"\r";
+                    }
+                    AddAttribute("tactics",tacticsString,charID);
+                }
+            }
+        }
+
+        //********** Environment *****************
+        var enviromentStr = findString(data, "Environment ", true);
+        if (enviromentStr !== undefined) {
+            enviromentStr = enviromentStr.replace("Environment ","");
+            AddAttribute("environment",enviromentStr,charID);
+        }
+        
+        //********** Organization  *****************
+        var orgStr = findString(data, "Organization ", true);
+        if (orgStr !== undefined) {
+            orgStr = orgStr.replace("Organization ","");
+            AddAttribute("organization",orgStr,charID);
+        }
+        
+if(showLog == true){
+log("Special Abilities");    
+}
+
+        //********** Special Abilities  *****************
+        var specialAbilitiesIdx = data.indexOf("Special Abilities");
+        if (specialAbilitiesIdx < 0) {
+            specialAbilitiesIdx = data.indexOf("SPECIAL ABILITIES");
+        }
+        if (specialAbilitiesIdx > 0) {
+            
+            if(showLog == true){
+log("specialAbilitiesIdx: "+specialAbilitiesIdx);    
+            }
+
+            var repeatNum = 0;
+            for (var ix = specialAbilitiesIdx+1;ix < data.length-1;ix++) {
+                
+if(showLog == true){
+    log("ix: "+ix +" data: "+data[ix]);
+}
+                
+                if (data[ix].length>0){
+                    splitIdx = data[ix].indexOf('(Ex)');
+                    if (splitIdx <0) {
+                        splitIdx = data[ix].indexOf('(Su)');
+                        if (splitIdx <0) {
+                            splitIdx = data[ix].indexOf('(Sp)');
+
+                        }
+                    }
+
+if(showLog == true){
+log("splitIdx: " + splitIdx);      
+}
+                              
+                    if (splitIdx !== -1) {
+                        var aSName = data[ix].slice(0,splitIdx);
+                        var aSType = data[ix].slice(splitIdx,splitIdx+4);
+                        var aSDescription = data[ix].slice(splitIdx+4);
+                        
+                        if(showLog == true){
+log("aSName: " + aSName.trim());
+log("aSType: " + aSType);
+log("aSDescription: " + aSDescription.trim());    
+                        }
+
+
+                        AddAttribute("repeating_ability_"+repeatNum+"_Name",aSName.trim(),charID);
+                        
+                        //_type isn't working
+                        if (aSType == "(Ex)") {
+                            AddAttribute("repeating_ability_"+repeatNum+"_type",'extraordinary',charID);
+                        }
+                        else if (aSType == "(Su)") {
+                            AddAttribute("repeating_ability_"+repeatNum+"_type",'supernatural',charID);
+                        }
+                        else if (aSType == "(Sp)") {
+                            AddAttribute("repeating_ability_"+repeatNum+"_type",'spell-like',charID);
+                        }
+
+                        AddAttribute("repeating_ability_"+repeatNum+"_description",aSDescription.trim(),charID);
+
+                        repeatNum++;
+                    }
+                    
+                    
+                }
+                
+            }
+        }
+            
+
+       
+        //****************  sets Token Name, Health, linked AC ******************
+        
+        token.set("name", tokenName||'');
+        token.set("showname", true);
+        token.set("bar3_value", HP||0);
+        token.set("bar3_max", HP||0);
+        token.set("bar2_value", kac||0);
+        token.set("bar1_value", eac||0);
+        token.set("showplayers_bar3", true);
+        //token.set("status_blue",true);
+        
+        }
+    });
+});
